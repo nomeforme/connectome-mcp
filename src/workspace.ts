@@ -248,6 +248,12 @@ export class WorkspaceBackend {
 
 /** Simple glob matching supporting * and ** */
 function matchGlob(path: string, pattern: string): boolean {
+  // **/*.ext should also match root-level files (no directory prefix)
+  if (pattern.startsWith('**/')) {
+    const sub = pattern.slice(3);
+    if (matchGlob(path, sub)) return true;
+  }
+
   // Convert glob to regex
   const regexStr = pattern
     .replace(/\./g, '\\.')
