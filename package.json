@@ -1,0 +1,28 @@
+{
+  "name": "@connectome/mcp",
+  "version": "1.0.0",
+  "description": "MCP server exposing Connectome VEIL state for Claude Code",
+  "type": "module",
+  "main": "./dist/server.js",
+  "bin": {
+    "connectome-mcp": "./dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@grpc/grpc-js": "^1.10.0",
+    "@grpc/proto-loader": "^0.7.10"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
