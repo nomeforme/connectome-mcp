@@ -27,14 +27,26 @@ import {
 import { CONNECTOME_TOOLS } from './tools.js';
 import { ConnectomeBackend } from './backend.js';
 import { WorkspaceBackend } from './workspace.js';
+import { SnapshotBackend } from './snapshot.js';
+import { DockerBackend } from './docker.js';
 
 const WORKSPACE_TOOLS = new Set([
   'workspace_list', 'workspace_read', 'workspace_search', 'workspace_write', 'workspace_delete',
 ]);
 
+const SNAPSHOT_TOOLS = new Set([
+  'snapshot_list', 'snapshot_inspect', 'snapshot_events', 'snapshot_frames', 'snapshot_search',
+]);
+
+const DOCKER_TOOLS = new Set([
+  'docker_status', 'docker_logs', 'docker_restart', 'docker_rebuild_all', 'docker_stop_bots',
+]);
+
 async function main() {
   const backend = new ConnectomeBackend();
   const workspace = new WorkspaceBackend();
+  const snapshot = new SnapshotBackend();
+  const docker = new DockerBackend();
 
   // Connect to Connectome server
   try {
@@ -75,6 +87,12 @@ async function main() {
       if (WORKSPACE_TOOLS.has(name)) {
         // Workspace tools — local filesystem, no gRPC needed
         result = await workspace.callTool(name, args || {});
+      } else if (SNAPSHOT_TOOLS.has(name)) {
+        // Snapshot tools — read persisted state from disk, no gRPC needed
+        result = await snapshot.callTool(name, args || {});
+      } else if (DOCKER_TOOLS.has(name)) {
+        // Docker tools — shell out to docker CLI, no gRPC needed
+        result = await docker.callTool(name, args || {});
       } else {
         // Connectome tools — lazy reconnect if needed
         if (!(backend as any).connected) {
