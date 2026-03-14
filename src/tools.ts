@@ -499,4 +499,19 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
       properties: {},
     },
   },
+  {
+    name: 'docker_diagnose',
+    description:
+      'Run comprehensive system diagnostics. Checks container health, Signal CLI status, recent error patterns, subscription stability, and API error rates. First step for investigating issues.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        since: {
+          type: 'string',
+          description: 'Time window for log analysis (default: "5m")',
+          default: '5m',
+        },
+      },
+    },
+  },
 ];

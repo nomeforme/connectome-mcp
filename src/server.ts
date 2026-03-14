@@ -39,7 +39,7 @@ const SNAPSHOT_TOOLS = new Set([
 ]);
 
 const DOCKER_TOOLS = new Set([
-  'docker_status', 'docker_logs', 'docker_restart', 'docker_rebuild_all', 'docker_stop_bots',
+  'docker_status', 'docker_logs', 'docker_restart', 'docker_rebuild_all', 'docker_stop_bots', 'docker_diagnose',
 ]);
 
 async function main() {

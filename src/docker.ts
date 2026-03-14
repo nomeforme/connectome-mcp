@@ -287,6 +287,141 @@ export class DockerBackend {
     // Timeout — proceed anyway so dependents still get restarted
   }
 
+  /**
+   * docker_diagnose — comprehensive system diagnostics
+   */
+  async diagnose(params: { since?: string }): Promise<string> {
+    const since = params.since || '5m';
+
+    // 1. Container status summary
+    const psResult = await run(
+      'docker ps -a --format \'{{.Names}}\t{{.State}}\t{{.Status}}\'',
+      SHORT_TIMEOUT,
+    );
+    const containers: { name: string; state: string; status: string }[] = [];
+    for (const line of psResult.stdout.split('\n')) {
+      if (!line.trim()) continue;
+      const [name, state, status] = line.split('\t');
+      if (name) containers.push({ name, state, status });
+    }
+    const running = containers.filter((c) => c.state === 'running');
+    const stopped = containers.filter((c) => c.state !== 'running');
+
+    // 2. Signal-CLI health check
+    let signalCliHealth: { ok: boolean; detail: string };
+    try {
+      const signalResult = await run(
+        'docker exec signal-cli curl -sf http://localhost:8080/v1/about',
+        SHORT_TIMEOUT,
+      );
+      signalCliHealth = {
+        ok: signalResult.stdout.length > 0,
+        detail: signalResult.stdout || signalResult.stderr || 'no response',
+      };
+    } catch {
+      signalCliHealth = { ok: false, detail: 'signal-cli container not reachable' };
+    }
+
+    // 3. Parse recent logs from key services for errors
+    const errorServices = ['signal-axon', 'discord-axon', 'connectome'];
+    const errorPatterns: { service: string; errors: string[] }[] = [];
+    for (const svc of errorServices) {
+      const logResult = await run(
+        `docker logs --since ${since} ${svc} 2>&1`,
+        SHORT_TIMEOUT,
+      );
+      const allLines = logResult.stdout.split('\n').concat(logResult.stderr.split('\n'));
+      const errors = allLines.filter((line) =>
+        /\bError\b|ERR\b|FATAL|panic|exception|unhandled|ECONNREFUSED|ENOTFOUND|timeout.*exceed/i.test(line) &&
+        !/error.?tracking.?enabled|error_count[=:]\s*0/i.test(line),
+      ).slice(-10); // last 10 error lines
+      errorPatterns.push({ service: svc, errors });
+    }
+
+    // 4. Sample up to 3 bot containers for subscription churn and API errors
+    const botContainers = running
+      .filter((c) => c.name.startsWith('bot-'))
+      .slice(0, 3);
+    const botSamples: { name: string; subscriptionChurn: string[]; apiErrors: string[] }[] = [];
+    for (const bot of botContainers) {
+      const logResult = await run(
+        `docker logs --since ${since} ${bot.name} 2>&1`,
+        SHORT_TIMEOUT,
+      );
+      const allLines = logResult.stdout.split('\n').concat(logResult.stderr.split('\n'));
+      const subscriptionChurn = allLines.filter((line) =>
+        /subscribe|unsubscribe|reconnect|resubscri|stream.*lost|GOAWAY/i.test(line),
+      ).slice(-5);
+      const apiErrors = allLines.filter((line) =>
+        /API.*error|rate.?limit|\b429\b|\b500\b|\b502\b|\b503\b|\b504\b|overloaded|capacity/i.test(line) &&
+        !/Advertised|binding|Connected to/i.test(line),
+      ).slice(-5);
+      botSamples.push({ name: bot.name, subscriptionChurn, apiErrors });
+    }
+
+    // 5. Build recommendations
+    const recommendations: string[] = [];
+
+    if (stopped.length > 0) {
+      recommendations.push(
+        `${stopped.length} container(s) stopped: ${stopped.map((c) => c.name).join(', ')}. Consider restarting.`,
+      );
+    }
+
+    if (!signalCliHealth.ok) {
+      recommendations.push('Signal CLI is not healthy. Check signal-cli container and restart if needed.');
+    }
+
+    for (const svc of errorPatterns) {
+      if (svc.errors.length > 0) {
+        recommendations.push(
+          `${svc.service} has ${svc.errors.length} recent error(s) in the last ${since}. Check logs for details.`,
+        );
+      }
+    }
+
+    for (const bot of botSamples) {
+      if (bot.subscriptionChurn.length > 3) {
+        recommendations.push(
+          `${bot.name} shows subscription churn (${bot.subscriptionChurn.length} events). May need restart with cascade.`,
+        );
+      }
+      if (bot.apiErrors.length > 0) {
+        recommendations.push(
+          `${bot.name} has ${bot.apiErrors.length} API error(s). Check rate limits or provider status.`,
+        );
+      }
+    }
+
+    if (recommendations.length === 0) {
+      recommendations.push('No issues detected. System appears healthy.');
+    }
+
+    return JSON.stringify({
+      since,
+      containers: {
+        total: containers.length,
+        running: running.length,
+        stopped: stopped.length,
+        stoppedNames: stopped.map((c) => c.name),
+      },
+      signalCli: signalCliHealth,
+      errors: errorPatterns.map((e) => ({
+        service: e.service,
+        count: e.errors.length,
+        recent: e.errors.slice(-3),
+      })),
+      botSamples: botSamples.map((b) => ({
+        name: b.name,
+        subscriptionChurnCount: b.subscriptionChurn.length,
+        apiErrorCount: b.apiErrors.length,
+        recentChurn: b.subscriptionChurn.slice(-2),
+        recentApiErrors: b.apiErrors.slice(-2),
+      })),
+      recommendations,
+    }, null, 2);
+  }
+
   // ── Tool dispatch ─────────────────────────────────────────────
 
   async callTool(name: string, args: any): Promise<string> {
@@ -296,6 +431,7 @@ export class DockerBackend {
       case 'docker_restart': return this.restart(args);
       case 'docker_rebuild_all': return this.rebuildAll();
       case 'docker_stop_bots': return this.stopBots();
+      case 'docker_diagnose': return this.diagnose(args);
       default: throw new Error(`Unknown docker tool: ${name}`);
     }
   }
