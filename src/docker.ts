@@ -21,7 +21,7 @@ const SHORT_TIMEOUT = 30_000;
 const RESTART_TIMEOUT = 120_000;
 
 /** Timeout for rebuild (docker compose up --build) */
-const REBUILD_TIMEOUT = 300_000;
+const REBUILD_TIMEOUT = 600_000;
 
 interface ExecResult {
   stdout: string;
@@ -210,7 +210,7 @@ export class DockerBackend {
     if (infra.length > 0) {
       results.push(await run(`docker compose up -d${buildFlag} ${infra.join(' ')}`, timeout));
       if (dependents.length > 0) {
-        await this.waitForHealthy(infra, 60_000);
+        await this.waitForHealthy(infra, 180_000);
       }
     }
     if (dependents.length > 0) {

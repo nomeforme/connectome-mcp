@@ -458,7 +458,7 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
   {
     name: 'docker_restart',
     description:
-      'Restart one or more Docker Compose services. With rebuild=true, does "docker compose up -d --build" (rebuilds images). With cascade=true, if restarting an axon or connectome service, also restarts all bot-* containers so they reconnect and resubscribe. IMPORTANT: Rebuilding bot-* containers also recreates connectome (build dependency). If connectome is recreated but axons are not restarted, axon gRPC subscriptions will enter a reconnection storm. Always include axons in the restart list or use cascade=true when rebuilding bots.',
+      'Restart one or more Docker Compose services. Each service has its own fully independent Dockerfile (docker/*.Dockerfile) — zero shared files, zero cross-service coupling. Rebuilding one service NEVER triggers rebuilds of others. Use rebuild=true after code changes. Use cascade=true when restarting infrastructure (connectome/axons) to also restart dependent bot-* containers so they reconnect. Which services to rebuild depends on what package changed: bot-runtime/src only → rebuild affected bot(s). agent-core/src → rebuild bots AND axons (both import it). connectome-ts/src → rebuild connectome, axons, and bots. grpc-common or axon-interfaces → rebuild all (leaf deps). discord-axon/src only → rebuild discord-axon.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -484,7 +484,7 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
   {
     name: 'docker_rebuild_all',
     description:
-      'Full rebuild of all Docker Compose services: "docker compose up -d --build". This rebuilds all images and recreates containers. Takes several minutes. Use only when needed (e.g. after code changes to multiple packages). Preferred over selective bot rebuilds because it restarts everything atomically — no subscription storms from stale gRPC connections.',
+      'Full rebuild of ALL Docker Compose services. Each service builds independently from its own Dockerfile so this is safe but slow. Use docker_restart with rebuild=true on specific services when possible.',
     inputSchema: {
       type: 'object',
       properties: {},
