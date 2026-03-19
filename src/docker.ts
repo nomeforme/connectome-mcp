@@ -12,7 +12,7 @@ import { promisify } from 'util';
 
 const exec = promisify(execCb);
 
-const COMPOSE_DIR = '/opt/connectome';
+const COMPOSE_DIR = process.env.COMPOSE_DIR || '/opt/connectome';
 
 /** Timeout for quick commands (status, logs) */
 const SHORT_TIMEOUT = 30_000;
@@ -167,6 +167,7 @@ export class DockerBackend {
     services: string[];
     rebuild?: boolean;
     cascade?: boolean;
+    callerBot?: string;
   }): Promise<string> {
     let services = [...params.services];
 
@@ -195,6 +196,15 @@ export class DockerBackend {
       }
     }
 
+    // Deferred self-restart: if callerBot is in the list, remove it from the
+    // immediate restart and schedule it after a delay so the response gets delivered.
+    const callerBot = params.callerBot;
+    let deferredSelf = false;
+    if (callerBot && services.includes(callerBot)) {
+      services = services.filter((s) => s !== callerBot);
+      deferredSelf = true;
+    }
+
     const timeout = params.rebuild ? REBUILD_TIMEOUT : RESTART_TIMEOUT;
 
     // Separate infrastructure services (connectome, axons) from dependents (bots)
@@ -205,16 +215,19 @@ export class DockerBackend {
     const results: ExecResult[] = [];
 
     const buildFlag = params.rebuild ? ' --build' : '';
+    // Force recreate ensures config changes (bind-mounted files) take effect
+    // even when the image hash hasn't changed
+    const recreateFlag = ' --force-recreate';
 
     // Always use `docker compose up -d` — handles both stopped and running containers
     if (infra.length > 0) {
-      results.push(await run(`docker compose up -d${buildFlag} ${infra.join(' ')}`, timeout));
+      results.push(await run(`docker compose up -d${buildFlag}${recreateFlag} ${infra.join(' ')}`, timeout));
       if (dependents.length > 0) {
         await this.waitForHealthy(infra, 180_000);
       }
     }
     if (dependents.length > 0) {
-      results.push(await run(`docker compose up -d${buildFlag} ${dependents.join(' ')}`, timeout));
+      results.push(await run(`docker compose up -d${buildFlag}${recreateFlag} ${dependents.join(' ')}`, timeout));
     }
 
     // stderr has the useful summary (Built, Started, Running, etc.)
@@ -222,9 +235,21 @@ export class DockerBackend {
     const stderr = results.map((r) => r.stderr).filter(Boolean).join('\n');
     const summary = summarizeDockerOutput(stderr);
 
+    // Schedule deferred self-restart (5s delay for response delivery)
+    if (deferredSelf && callerBot) {
+      const buildFlag = params.rebuild ? ' --build' : '';
+      const selfTimeout = params.rebuild ? REBUILD_TIMEOUT : RESTART_TIMEOUT;
+      console.log(`[Docker] Scheduling deferred self-restart for ${callerBot} in 5s`);
+      setTimeout(() => {
+        run(`docker compose up -d${buildFlag} --force-recreate ${callerBot}`, selfTimeout)
+          .then(() => console.log(`[Docker] Deferred self-restart of ${callerBot} complete`))
+          .catch((err) => console.error(`[Docker] Deferred self-restart of ${callerBot} failed:`, err.message));
+      }, 5000);
+    }
+
     return JSON.stringify({
       action: params.rebuild ? 'rebuild' : 'restart',
-      services,
+      services: [...services, ...(deferredSelf && callerBot ? [`${callerBot} (deferred 5s)`] : [])],
       cascade: params.cascade || false,
       infraFirst: infra,
       dependents,
