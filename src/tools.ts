@@ -477,6 +477,10 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
           description: 'If true and restarting an axon or connectome, also restart all bot-* containers. Default: false.',
           default: false,
         },
+        callerBot: {
+          type: 'string',
+          description: 'Container name of the bot calling this tool (e.g. "bot-opus-46"). If set and included in services, that bot\'s restart is deferred 5s so the tool response is delivered first.',
+        },
       },
       required: ['services'],
     },
