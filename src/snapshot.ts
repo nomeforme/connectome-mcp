@@ -24,19 +24,18 @@ export class SnapshotBackend {
    * List available snapshots with metadata
    */
   async listSnapshots(params: { limit?: number }): Promise<string> {
-    const limit = params.limit || 20;
+    const limit = params.limit || 10;
     const snapshotDir = join(this.stateDir, 'snapshots');
 
     let files: string[];
     try {
       files = await readdir(snapshotDir);
     } catch {
-      return JSON.stringify({ error: `Cannot read snapshot directory: ${snapshotDir}` }, null, 2);
+      return JSON.stringify({ error: `Cannot read snapshot directory: ${snapshotDir}` });
     }
 
     files = files.filter(f => f.endsWith('.json')).sort();
 
-    // Parse sequence and timestamp from filenames: snapshot-{seq}-{ts}.json
     const snapshots = files.map(f => {
       const match = f.match(/^snapshot-(\d+)-(\d+)\.json$/);
       if (!match) return null;
@@ -48,11 +47,9 @@ export class SnapshotBackend {
       };
     }).filter(Boolean) as { file: string; sequence: number; timestamp: number; date: string }[];
 
-    // Sort by timestamp descending (newest first), take limit
     snapshots.sort((a, b) => b.timestamp - a.timestamp);
     const selected = snapshots.slice(0, limit);
 
-    // Get file sizes for selected snapshots
     const results = await Promise.all(selected.map(async (s) => {
       try {
         const st = await stat(join(snapshotDir, s.file));
@@ -62,7 +59,6 @@ export class SnapshotBackend {
       }
     }));
 
-    // Also count deltas and frame buckets
     let deltaCount = 0;
     let bucketCount = 0;
     try {
@@ -80,18 +76,22 @@ export class SnapshotBackend {
     } catch { /* skip */ }
 
     return JSON.stringify({
-      stateDir: this.stateDir,
       totalSnapshots: snapshots.length,
       totalDeltas: deltaCount,
       totalFrameBuckets: bucketCount,
       snapshots: results,
-    }, null, 2);
+    });
   }
 
   /**
-   * Inspect a snapshot — show facet type counts, streams, agents, frame bucket refs
+   * Inspect a snapshot — show facet type counts, streams summary, frame bucket summary
    */
-  async inspectSnapshot(params: { sequence?: number; file?: string }): Promise<string> {
+  async inspectSnapshot(params: {
+    sequence?: number;
+    file?: string;
+    include_streams?: boolean;
+    include_buckets?: boolean;
+  }): Promise<string> {
     const snap = await this.loadSnapshot(params.sequence, params.file);
     if (typeof snap === 'string') return snap; // error
 
@@ -105,45 +105,63 @@ export class SnapshotBackend {
       typeCounts[t] = (typeCounts[t] || 0) + 1;
     }
 
-    // Count facets by stream
+    // Count facets by stream — only top 20
     const streamCounts: Record<string, number> = {};
     for (const f of facets) {
       const sid = f.streamId || 'global';
       streamCounts[sid] = (streamCounts[sid] || 0) + 1;
     }
+    const sortedStreams = Object.entries(streamCounts)
+      .sort(([, a], [, b]) => b - a);
+    const topStreams = Object.fromEntries(sortedStreams.slice(0, 20));
 
-    // Parse streams
-    const streams = this.parseMapEntries(vs.streams || []).map((s: any) => ({
-      id: s.id,
-      name: s.name || undefined,
-      type: s.metadata?.channelType || undefined,
-      platform: s.id?.split(':')[0] || undefined,
-      parentId: s.parentId || undefined,
-    }));
+    // Stream count from registry
+    const allStreams = this.parseMapEntries(vs.streams || []);
 
-    // Frame bucket refs
-    const bucketRefs = (vs.frameBucketRefs || []).map((r: any) => ({
-      startSequence: r.startSequence,
-      endSequence: r.endSequence,
-      frameCount: r.frameCount,
-      hash: r.hash,
-    }));
+    // Frame bucket summary (not full list)
+    const bucketRefs: any[] = vs.frameBucketRefs || [];
+    const bucketSummary = {
+      count: bucketRefs.length,
+      sequenceRange: bucketRefs.length > 0
+        ? { from: bucketRefs[0].startSequence, to: bucketRefs[bucketRefs.length - 1].endSequence }
+        : null,
+      totalFrames: bucketRefs.reduce((acc: number, r: any) => acc + (r.frameCount || 0), 0),
+    };
 
-    return JSON.stringify({
-      version: snap.version,
+    const result: any = {
       sequence: snap.sequence,
       timestamp: snap.timestamp,
-      lifecycleId: snap.lifecycleId,
-      metadata: snap.metadata,
-      facetTypeCounts: typeCounts,
-      facetsByStream: Object.fromEntries(
-        Object.entries(streamCounts).sort(([, a], [, b]) => (b as number) - (a as number))
-      ),
-      streamCount: streams.length,
-      streams,
-      frameBucketRefs: bucketRefs,
       currentSequence: vs.currentSequence,
-    }, null, 2);
+      facetTypeCounts: typeCounts,
+      streamsWithFacets: sortedStreams.length,
+      streamsInRegistry: allStreams.length,
+      topStreamsByFacetCount: topStreams,
+      remainingStreams: sortedStreams.length > 20 ? sortedStreams.length - 20 : 0,
+      frameBuckets: bucketSummary,
+    };
+
+    // Optional full stream list (opt-in to avoid context bombs)
+    if (params.include_streams) {
+      result.streams = allStreams.map((s: any) => ({
+        id: s.id,
+        name: s.name || undefined,
+        platform: s.id?.split(':')[0] || undefined,
+        parentId: s.parentId || undefined,
+        facetCount: streamCounts[s.id] || 0,
+      }));
+    }
+
+    // Optional full bucket ref list
+    if (params.include_buckets) {
+      result.frameBucketRefs = bucketRefs.map((r: any) => ({
+        startSequence: r.startSequence,
+        endSequence: r.endSequence,
+        frameCount: r.frameCount,
+        hash: r.hash,
+      }));
+    }
+
+    return JSON.stringify(result);
   }
 
   /**
@@ -156,8 +174,10 @@ export class SnapshotBackend {
     author?: string;
     facet_types?: string[];
     limit?: number;
+    offset?: number;
   }): Promise<string> {
-    const limit = params.limit || 50;
+    const limit = Math.min(params.limit || 30, 100);
+    const offset = params.offset || 0;
     const snap = await this.loadSnapshot(params.sequence, params.file);
     if (typeof snap === 'string') return snap;
 
@@ -183,29 +203,29 @@ export class SnapshotBackend {
       return ta - tb;
     });
 
-    const events = filtered.slice(-limit).map(f => ({
-      id: f.id,
+    const page = filtered.slice(offset, offset + limit);
+    const events = page.map(f => ({
       type: f.type,
       streamId: f.streamId,
       agentName: f.agentName || undefined,
       authorName: f.state?.authorName || f.state?.sender || undefined,
-      content: truncate(f.content, 500),
+      content: truncate(f.content, 300),
       timestamp: f.state?.timestamp ? new Date(f.state.timestamp).toISOString() : undefined,
-      rawTimestamp: f.state?.timestamp,
     }));
 
     return JSON.stringify({
-      snapshot: { sequence: snap.sequence, timestamp: snap.timestamp },
+      snapshot: { sequence: snap.sequence },
       filter: { stream_id: params.stream_id, author: params.author, types },
+      total: filtered.length,
+      offset,
       count: events.length,
-      totalMatching: filtered.length,
+      hasMore: offset + limit < filtered.length,
       events,
-    }, null, 2);
+    });
   }
 
   /**
    * Read frame buckets from a snapshot to get historical conversation data.
-   * Frame buckets contain the immutable event log with all events and deltas.
    */
   async snapshotFrames(params: {
     sequence?: number;
@@ -213,27 +233,28 @@ export class SnapshotBackend {
     bucket_index?: number;
     stream_id?: string;
     limit?: number;
+    offset?: number;
     event_topics?: string[];
   }): Promise<string> {
-    const limit = params.limit || 50;
+    const limit = Math.min(params.limit || 30, 100);
+    const offset = params.offset || 0;
     const snap = await this.loadSnapshot(params.sequence, params.file);
     if (typeof snap === 'string') return snap;
 
     const bucketRefs: any[] = snap.veilState.frameBucketRefs || [];
     if (bucketRefs.length === 0) {
-      return JSON.stringify({ error: 'No frame bucket refs in snapshot' }, null, 2);
+      return JSON.stringify({ error: 'No frame bucket refs in snapshot' });
     }
 
     // If bucket_index specified, read that one bucket; otherwise read from the end
     let refsToRead: any[];
     if (params.bucket_index !== undefined) {
       if (params.bucket_index < 0 || params.bucket_index >= bucketRefs.length) {
-        return JSON.stringify({ error: `bucket_index ${params.bucket_index} out of range [0, ${bucketRefs.length - 1}]` }, null, 2);
+        return JSON.stringify({ error: `bucket_index ${params.bucket_index} out of range [0, ${bucketRefs.length - 1}]` });
       }
       refsToRead = [bucketRefs[params.bucket_index]];
     } else {
-      // Read from the most recent bucket backwards until we have enough frames
-      refsToRead = [...bucketRefs].reverse().slice(0, 5); // max 5 buckets
+      refsToRead = [...bucketRefs].reverse().slice(0, 3);
     }
 
     const allFrames: any[] = [];
@@ -243,12 +264,9 @@ export class SnapshotBackend {
 
       let frames = bucket.frames || [];
 
-      // Filter by stream if specified
       if (params.stream_id) {
         frames = frames.filter((f: any) => f.activeStream?.streamId === params.stream_id);
       }
-
-      // Filter by event topic if specified
       if (params.event_topics?.length) {
         frames = frames.filter((f: any) =>
           (f.events || []).some((e: any) => params.event_topics!.includes(e.topic))
@@ -260,25 +278,24 @@ export class SnapshotBackend {
       }
     }
 
-    // Sort by sequence and take limit from end
     allFrames.sort((a, b) => a.sequence - b.sequence);
-    const selected = allFrames.slice(-limit);
+    const page = allFrames.slice(offset, offset + limit);
 
     return JSON.stringify({
-      snapshot: { sequence: snap.sequence, timestamp: snap.timestamp },
+      snapshot: { sequence: snap.sequence },
       bucketsRead: refsToRead.length,
       totalBuckets: bucketRefs.length,
       filter: { stream_id: params.stream_id, event_topics: params.event_topics },
-      frameCount: selected.length,
-      totalMatching: allFrames.length,
-      frames: selected,
-    }, null, 2);
+      total: allFrames.length,
+      offset,
+      count: page.length,
+      hasMore: offset + limit < allFrames.length,
+      frames: page,
+    });
   }
 
   /**
-   * Search across ALL frame buckets for messages by content, author, stream, or topic.
-   * Searches both event payloads AND delta facets (older frames store conversation
-   * data as VEIL deltas with facet.content / facet.stateJson rather than events).
+   * Search across frame buckets for messages by content, author, stream, or topic.
    */
   async searchHistory(params: {
     query?: string;
@@ -287,18 +304,18 @@ export class SnapshotBackend {
     topic?: string;
     facet_types?: string[];
     limit?: number;
+    offset?: number;
     all_buckets?: boolean;
   }): Promise<string> {
-    const limit = params.limit || 30;
+    const limit = Math.min(params.limit || 20, 100);
+    const offset = params.offset || 0;
     const searchTypes = new Set(params.facet_types || ['event', 'speech']);
     const queryLower = params.query?.toLowerCase();
     const authorLower = params.author?.toLowerCase();
 
-    // Determine which buckets to read
     let bucketHashes: { hash: string; start: number; end: number }[];
 
     if (params.all_buckets) {
-      // Scan ALL frame buckets on disk (not just those referenced by a snapshot)
       bucketHashes = await this.getAllBucketHashes();
     } else {
       const snap = await this.loadSnapshot();
@@ -335,13 +352,12 @@ export class SnapshotBackend {
             streamId,
             source: 'event',
             topic: event.topic,
-            facetType: undefined,
             authorName: payload.authorName || payload.sender,
-            content: truncate(payload.content, 300),
+            content: truncate(payload.content, 200),
           });
         }
 
-        // Search delta facets (older frame format — conversation data is in deltas)
+        // Search delta facets (older frame format)
         for (const delta of (frame.deltas || [])) {
           const facet = delta.facet;
           if (!facet) continue;
@@ -361,14 +377,13 @@ export class SnapshotBackend {
             source: 'delta',
             facetType: facet.type,
             authorName: state?.authorName || state?.sender || facet.agentName,
-            agentName: facet.agentName || undefined,
-            content: truncate(facet.content, 300),
+            content: truncate(facet.content, 200),
           });
         }
       }
     }
 
-    // Deduplicate — same frame can appear in overlapping buckets
+    // Deduplicate
     const seen = new Set<string>();
     const deduped = matches.filter(m => {
       const key = `${m.sequence}:${m.facetType || m.topic}:${(m.content || '').slice(0, 50)}`;
@@ -377,20 +392,18 @@ export class SnapshotBackend {
       return true;
     });
 
-    // Sort by sequence
     deduped.sort((a, b) => a.sequence - b.sequence);
-    const selected = deduped.slice(-limit);
+    const page = deduped.slice(offset, offset + limit);
 
     return JSON.stringify({
-      filter: { query: params.query, author: params.author, stream_id: params.stream_id, topic: params.topic, facet_types: params.facet_types },
-      totalMatching: deduped.length,
-      count: selected.length,
+      filter: { query: params.query, author: params.author, stream_id: params.stream_id, topic: params.topic },
+      total: deduped.length,
+      offset,
+      count: page.length,
+      hasMore: offset + limit < deduped.length,
       bucketsSearched: bucketHashes.length,
-      sequenceRange: bucketHashes.length > 0
-        ? { from: bucketHashes[0].start, to: bucketHashes[bucketHashes.length - 1].end }
-        : null,
-      results: selected,
-    }, null, 2);
+      results: page,
+    });
   }
 
   // ── Tool dispatch ─────────────────────────────────────────────
@@ -415,23 +428,19 @@ export class SnapshotBackend {
     if (file) {
       targetFile = file;
     } else if (sequence !== undefined) {
-      // Find snapshot by sequence number
       const files = await readdir(snapshotDir);
       const matching = files.filter(f => f.startsWith(`snapshot-${sequence}-`));
       if (matching.length === 0) {
-        return JSON.stringify({ error: `No snapshot found for sequence ${sequence}` }, null, 2);
+        return JSON.stringify({ error: `No snapshot found for sequence ${sequence}` });
       }
-      // Take the latest one if multiple exist
       matching.sort();
       targetFile = matching[matching.length - 1];
     } else {
-      // Find the latest snapshot
       const files = await readdir(snapshotDir);
       const snapFiles = files.filter(f => f.endsWith('.json')).sort();
       if (snapFiles.length === 0) {
-        return JSON.stringify({ error: 'No snapshots found' }, null, 2);
+        return JSON.stringify({ error: 'No snapshots found' });
       }
-      // Latest by name (timestamp is embedded)
       let latest = snapFiles[0];
       let latestTs = 0;
       for (const f of snapFiles) {
@@ -448,7 +457,7 @@ export class SnapshotBackend {
       const raw = await readFile(join(snapshotDir, targetFile), 'utf-8');
       return JSON.parse(raw);
     } catch (err: any) {
-      return JSON.stringify({ error: `Failed to read snapshot ${targetFile}: ${err.message}` }, null, 2);
+      return JSON.stringify({ error: `Failed to read snapshot ${targetFile}: ${err.message}` });
     }
   }
 
@@ -465,12 +474,10 @@ export class SnapshotBackend {
   }
 
   private parseFacetMap(entries: any[]): any[] {
-    // VEIL serializes Maps as [[key, value], ...] pairs
     if (entries.length === 0) return [];
     if (Array.isArray(entries[0]) && entries[0].length === 2) {
       return entries.map(([, value]: [string, any]) => value);
     }
-    // If it's already an array of objects
     return entries;
   }
 
@@ -487,33 +494,26 @@ export class SnapshotBackend {
       const payload = decodeJsonField(e.payloadJson);
       return {
         topic: e.topic,
-        source: e.source?.componentId,
         authorName: payload?.authorName || payload?.sender,
-        content: truncate(payload?.content, 200),
-        messageId: payload?.messageId,
+        content: truncate(payload?.content, 150),
       };
     });
 
-    // Extract conversation-relevant deltas (event + speech facets) separately
     const conversationDeltas: any[] = [];
-    const otherDeltas: any[] = [];
+    let otherDeltaCount = 0;
     for (const d of (frame.deltas || [])) {
       const facet = d.facet;
-      if (facet && (facet.type === 'event' || facet.type === 'speech')) {
+      if (facet && (facet.type === 'event' || facet.type === 'speech' || facet.type === 'action')) {
         const state = decodeJsonField(facet.stateJson);
         conversationDeltas.push({
           type: d.type,
           facetType: facet.type,
           agentName: facet.agentName || undefined,
           authorName: state?.authorName || state?.sender || undefined,
-          content: truncate(facet.content, 200),
+          content: truncate(facet.content, 150),
         });
       } else {
-        otherDeltas.push({
-          type: d.type,
-          facetId: d.facetId || facet?.id,
-          facetType: facet?.type,
-        });
+        otherDeltaCount++;
       }
     }
 
@@ -521,19 +521,12 @@ export class SnapshotBackend {
       sequence: frame.sequence,
       timestamp: frame.timestamp,
       streamId: frame.activeStream?.streamId,
-      eventCount: events.length,
-      deltaCount: (frame.deltas || []).length,
       events: events.length > 0 ? events : undefined,
       conversation: conversationDeltas.length > 0 ? conversationDeltas : undefined,
-      otherDeltas: otherDeltas.length <= 3
-        ? (otherDeltas.length > 0 ? otherDeltas : undefined)
-        : otherDeltas.slice(0, 3).concat([{ note: `...and ${otherDeltas.length - 3} more` }]),
+      otherDeltas: otherDeltaCount > 0 ? otherDeltaCount : undefined,
     };
   }
 
-  /**
-   * Scan ALL frame bucket files on disk (not just those referenced by a snapshot).
-   */
   private async getAllBucketHashes(): Promise<{ hash: string; start: number; end: number }[]> {
     const bucketDir = join(this.stateDir, 'frame-buckets');
     const results: { hash: string; start: number; end: number }[] = [];
@@ -578,27 +571,18 @@ function truncate(s: string | undefined, max: number): string | undefined {
   return s.slice(0, max) + '…';
 }
 
-/**
- * Decode a JSON field that may be:
- * - a plain string (JSON)
- * - an object (already parsed)
- * - a Buffer-like {type: "Buffer", data: [...]} (Node.js Buffer serialization)
- * - a Uint8Array-like array of numbers
- */
 function decodeJsonField(field: any): any {
   if (!field) return null;
   if (typeof field === 'string') {
     try { return JSON.parse(field); } catch { return null; }
   }
   if (typeof field === 'object') {
-    // Buffer-like: {type: "Buffer", data: [number...]}
     if (field.type === 'Buffer' && Array.isArray(field.data)) {
       try {
         const str = Buffer.from(field.data).toString('utf-8');
         return JSON.parse(str);
       } catch { return null; }
     }
-    // Already a parsed object (no type/data structure)
     if (!Array.isArray(field)) return field;
   }
   return null;

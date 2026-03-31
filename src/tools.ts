@@ -283,17 +283,19 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
   },
 
   // ── Snapshot Inspection Tools ──────────────────────────────────
+  // NOTE: Snapshot tools return paginated results. Start with small limits
+  // and use offset to page through. Always filter by stream_id when possible.
   {
     name: 'snapshot_list',
     description:
-      'List persisted VEIL snapshots on disk. Shows sequence numbers, timestamps, file sizes. Also reports delta and frame bucket counts. Use this to discover what historical data is available.',
+      'List persisted VEIL snapshots on disk. Returns sequence numbers, timestamps, file sizes. Start here to discover available historical data. Keep limit small.',
     inputSchema: {
       type: 'object',
       properties: {
         limit: {
           type: 'number',
-          description: 'Max snapshots to list (default: 20, newest first)',
-          default: 20,
+          description: 'Max snapshots to list (default: 10, newest first)',
+          default: 10,
         },
       },
     },
@@ -301,7 +303,7 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
   {
     name: 'snapshot_inspect',
     description:
-      'Inspect a specific snapshot — facet type counts, stream list, frame bucket refs, metadata. Defaults to the latest snapshot if no sequence is given.',
+      'Inspect a snapshot — facet type counts, top 20 streams by facet count, frame bucket summary. Returns a compact overview by default. Set include_streams=true or include_buckets=true only if you need the full lists.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -313,13 +315,23 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
           type: 'string',
           description: 'Exact snapshot filename (alternative to sequence)',
         },
+        include_streams: {
+          type: 'boolean',
+          description: 'Include full stream list with facet counts (can be large). Default: false.',
+          default: false,
+        },
+        include_buckets: {
+          type: 'boolean',
+          description: 'Include full frame bucket ref list (can be large). Default: false.',
+          default: false,
+        },
       },
     },
   },
   {
     name: 'snapshot_events',
     description:
-      'Extract event/speech facets from a persisted snapshot. Filter by stream_id, author name, or facet type. Shows content, author, timestamps. Defaults to latest snapshot.',
+      'Read event/speech facets from a persisted snapshot. Paginated — use offset to page. Always filter by stream_id when possible. Use facet_types=["event","speech"] for full conversation.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -329,7 +341,7 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
         },
         stream_id: {
           type: 'string',
-          description: 'Filter by stream ID (e.g. "discord:guildId:channelId")',
+          description: 'Filter by stream ID (e.g. "discord:guildId:channelId"). Strongly recommended.',
         },
         author: {
           type: 'string',
@@ -342,8 +354,13 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
         },
         limit: {
           type: 'number',
-          description: 'Max events to return (default: 50)',
-          default: 50,
+          description: 'Results per page (default: 30, max: 100)',
+          default: 30,
+        },
+        offset: {
+          type: 'number',
+          description: 'Skip this many results (for pagination). Default: 0.',
+          default: 0,
         },
       },
     },
@@ -351,7 +368,7 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
   {
     name: 'snapshot_frames',
     description:
-      'Read frame buckets from a snapshot to access the immutable event log. Frame buckets contain the full history of events and VEIL deltas. Filter by stream_id or event topic.',
+      'Read frame buckets from a snapshot — the immutable event log with events and VEIL deltas. Paginated. Filter by stream_id or event topic. Reads last 3 buckets by default.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -365,7 +382,7 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
         },
         stream_id: {
           type: 'string',
-          description: 'Filter frames by stream ID',
+          description: 'Filter frames by stream ID. Strongly recommended.',
         },
         event_topics: {
           type: 'array',
@@ -374,8 +391,13 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
         },
         limit: {
           type: 'number',
-          description: 'Max frames to return (default: 50)',
-          default: 50,
+          description: 'Results per page (default: 30, max: 100)',
+          default: 30,
+        },
+        offset: {
+          type: 'number',
+          description: 'Skip this many results (for pagination). Default: 0.',
+          default: 0,
         },
       },
     },
@@ -383,7 +405,7 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
   {
     name: 'snapshot_search',
     description:
-      'Search frame buckets for messages matching a query, author, stream, or topic. Searches BOTH event payloads (newer format) AND delta facets (older format where conversation data is in VEIL deltas). By default searches buckets referenced by the latest snapshot; set all_buckets=true to scan every bucket on disk.',
+      'Search frame buckets for messages matching a query, author, stream, or topic. Paginated. Always filter by stream_id when possible. Set all_buckets=true only for broad cross-stream searches.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -397,7 +419,7 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
         },
         stream_id: {
           type: 'string',
-          description: 'Filter by stream ID',
+          description: 'Filter by stream ID. Strongly recommended.',
         },
         topic: {
           type: 'string',
@@ -410,12 +432,17 @@ export const CONNECTOME_TOOLS: ToolDefinition[] = [
         },
         all_buckets: {
           type: 'boolean',
-          description: 'Scan ALL frame buckets on disk, not just those in the latest snapshot (slower but comprehensive)',
+          description: 'Scan ALL frame buckets on disk, not just latest snapshot refs. Slower but comprehensive.',
         },
         limit: {
           type: 'number',
-          description: 'Max results to return (default: 30)',
-          default: 30,
+          description: 'Results per page (default: 20, max: 100)',
+          default: 20,
+        },
+        offset: {
+          type: 'number',
+          description: 'Skip this many results (for pagination). Default: 0.',
+          default: 0,
         },
       },
     },
